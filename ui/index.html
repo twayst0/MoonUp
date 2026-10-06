@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MoonUp</title>
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/shell.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/pages.css">
+  <link rel="stylesheet" href="css/intro.css">
+</head>
+<body class="booting">
+  <!-- Ambient colour field behind the glass -->
+  <div class="ambient" aria-hidden="true"><i class="orb o1"></i><i class="orb o2"></i><i class="orb o3"></i><i class="grain"></i></div>
+
+  <!-- Window resize handles (the native frame is removed) -->
+  <div class="rz rz-l" data-edge="l"></div><div class="rz rz-r" data-edge="r"></div>
+  <div class="rz rz-t" data-edge="t"></div><div class="rz rz-b" data-edge="b"></div>
+  <div class="rz rz-tl" data-edge="tl"></div><div class="rz rz-tr" data-edge="tr"></div>
+  <div class="rz rz-bl" data-edge="bl"></div><div class="rz rz-br" data-edge="br"></div>
+
+  <div id="app" class="app">
+    <header class="titlebar" id="titlebar">
+      <div class="tb-brand" data-drag>
+        <img class="tb-logo" id="tbLogo" src="img/logo.png" alt="">
+        <span class="tb-name">MoonUp</span>
+      </div>
+      <div class="tb-center" data-drag>
+        <div class="status-chip" id="statusChip">
+          <span class="dot"></span><span class="label" id="statusLabel"></span>
+        </div>
+      </div>
+      <div class="tb-controls">
+        <button class="wc" id="wcMin" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M1 5.5h8"/></svg></button>
+        <button class="wc" id="wcMax" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="1"/></svg></button>
+        <button class="wc wc-close" id="wcClose" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>
+      </div>
+    </header>
+
+    <nav class="sidebar" id="sidebar">
+      <div class="nav" id="nav"></div>
+      <div class="side-foot" id="sideFoot"></div>
+    </nav>
+
+    <main class="content" id="content">
+      <div class="page" id="page"></div>
+    </main>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root"></div>
+
+  <!-- Intro -->
+  <div id="intro" class="intro">
+    <div class="intro-veil" id="introVeil"></div>
+    <div class="intro-stage" id="introStage">
+      <div class="intro-tile" id="introTile">
+        <div class="intro-caustic"></div>
+        <div class="intro-sheen" id="introSheen"></div>
+      </div>
+      <img class="intro-logo" id="introLogo" src="img/logo.png" alt="">
+      <div class="intro-word" id="introWord" aria-label="MoonUp"></div>
+      <div class="intro-tag" id="introTag"></div>
+    </div>
+    <div class="intro-skip" id="introSkip"></div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

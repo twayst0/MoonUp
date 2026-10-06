@@ -1,0 +1,44 @@
+/* Startup sequence (about 2.8 s, click or any key skips).
+   The logo the native splash showed settles into a liquid-glass tile, light runs around the
+   tile's rim, the wordmark comes into focus letter by letter, and on exit the logo glides into
+   its place in the title bar while the app fades in behind it. Driven by intro.js. */
+@property --ang { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+
+.intro { position: fixed; inset: 0; z-index: 10000; cursor: pointer; overflow: hidden; }
+.intro-veil { position: absolute; inset: 0; background: var(--bg-deep); }
+
+.intro-stage { position: absolute; left: 50%; top: 50%; display: flex; flex-direction: column; align-items: center; transform: translate(-50%, -50%); }
+
+.intro-tile {
+  position: relative; width: 176px; height: 176px; border-radius: 48px; overflow: hidden; opacity: 0;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.04) 45%, rgba(255, 255, 255, 0.07)), rgba(30, 44, 84, 0.32);
+  -webkit-backdrop-filter: blur(26px) saturate(180%); backdrop-filter: blur(26px) saturate(180%);
+  box-shadow: inset 0 1.5px 0 rgba(255, 255, 255, 0.3), inset 0 -1px 0 rgba(0, 0, 0, 0.25), inset 0 0 30px rgba(120, 160, 255, 0.08),
+    0 30px 70px -20px rgba(0, 0, 0, 0.7), 0 0 80px -10px rgba(60, 110, 255, 0.28);
+}
+/* Rim light that travels around the edge. */
+.intro-tile::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.5px; pointer-events: none;
+  background: conic-gradient(from var(--ang), rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.75) 12%, rgba(170, 200, 255, 0.25) 22%, rgba(255, 255, 255, 0.05) 40%, rgba(255, 255, 255, 0.05) 60%, rgba(160, 190, 255, 0.45) 74%, rgba(255, 255, 255, 0.05) 88%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: rim 3.2s linear infinite;
+}
+@keyframes rim { to { --ang: 360deg; } }
+/* Coloured light refracted inside the glass. */
+.intro-caustic { position: absolute; width: 140px; height: 140px; left: -20px; top: 50px; border-radius: 50%; background: radial-gradient(circle, var(--orb-1), transparent 70%); filter: blur(18px); opacity: 0.55; animation: caustic 4s ease-in-out infinite alternate; }
+@keyframes caustic { to { transform: translate(60px, -40px) scale(1.15); } }
+.intro-sheen { position: absolute; top: -20%; bottom: -20%; left: 0; width: 46%; background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.28), transparent); transform: translateX(-160%) skewX(-16deg); }
+
+.intro-logo { position: absolute; top: 24px; left: calc(50% - 64px); width: 128px; height: 128px; transform-origin: 50% 50%; filter: drop-shadow(0 8px 24px rgba(225, 232, 255, 0.28)); will-change: transform; }
+
+.intro-word { margin-top: 30px; height: 56px; display: flex; font-size: 48px; line-height: 56px; font-weight: 680; letter-spacing: -0.04em; white-space: pre; }
+.intro-word span { display: inline-block; opacity: 0; background: linear-gradient(180deg, #ffffff 20%, #cfd4de 95%); -webkit-background-clip: text; background-clip: text; color: transparent; padding: 0 0.01em; }
+.intro-tag { margin-top: 8px; height: 18px; font-size: 13px; font-weight: 500; letter-spacing: 0.01em; color: var(--t2); opacity: 0; white-space: pre; }
+
+.intro-skip { position: absolute; bottom: 24px; left: 0; right: 0; text-align: center; font-size: 11.5px; font-weight: 500; color: var(--t4); opacity: 0; transition: opacity 600ms var(--ease); }
+.intro.show-skip .intro-skip { opacity: 1; }
+.intro.leaving .intro-skip { opacity: 0; transition-duration: 200ms; }
+
+/* Shell entrance after the sequence. */
+.app.enter { animation: appIn 700ms var(--ease-out) both; }
+@keyframes appIn { from { opacity: 0; transform: scale(0.985); } }

@@ -1,0 +1,220 @@
+/* MoonUp — design tokens and base styles.
+   Visual language: liquid glass. Translucent layers over a slow, dim ambient field; light
+   edges instead of hard rules; spring motion. Contrast is kept soft (no pure white, no pure
+   black) so the app is easy on the eyes in a dark room. */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 900;
+  src: url(../fonts/inter-latin-opsz-normal.woff2) format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 900;
+  src: url(../fonts/inter-latin-ext-opsz-normal.woff2) format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 900;
+  src: url(../fonts/inter-cyrillic-opsz-normal.woff2) format("woff2-variations");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 800;
+  src: url(../fonts/jetbrains-mono-latin-wght-normal.woff2) format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 800;
+  src: url(../fonts/jetbrains-mono-latin-ext-wght-normal.woff2) format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1E00-1E9F, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 800;
+  src: url(../fonts/jetbrains-mono-cyrillic-wght-normal.woff2) format("woff2-variations");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+:root {
+  color-scheme: dark;
+  /* MoonUp: moonlight on a night sky. Neutral graphite glass, silver light, a faint cold blue
+     only in the ambient glow. */
+  --bg: #07080b;
+  --bg-deep: #030406;
+
+  /* glass layers */
+  --glass: rgba(22, 24, 30, 0.48);
+  --glass-strong: rgba(17, 19, 24, 0.74);
+  --glass-hover: rgba(255, 255, 255, 0.05);
+  --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.018) 46%, rgba(255, 255, 255, 0.03));
+  --glass-edge: rgba(255, 255, 255, 0.085);
+  --glass-rim: linear-gradient(150deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.06) 26%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.05) 76%, rgba(255, 255, 255, 0.16));
+  --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 -1px 0 rgba(0, 0, 0, 0.18) inset, 0 18px 50px -18px rgba(0, 0, 0, 0.55);
+  --blur: 30px;
+
+  /* legacy names used across components and the telemetry canvas */
+  --raised: rgba(255, 255, 255, 0.04);
+  --raised-2: rgba(255, 255, 255, 0.07);
+  --inset: rgba(3, 4, 7, 0.45);
+  --line: rgba(255, 255, 255, 0.065);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --line-3: rgba(255, 255, 255, 0.19);
+
+  --t1: #eceef2;
+  --t2: #b1b6c0;
+  --t3: #82878f;
+  --t4: #52565e;
+
+  /* default accent "moon": silver */
+  --accent: #d7dce5;
+  --accent-2: #a9b0bd;
+  --accent-hi: #ffffff;
+  --accent-dim: rgba(215, 220, 229, 0.12);
+  --accent-line: rgba(215, 220, 229, 0.42);
+  --accent-glow: rgba(225, 232, 255, 0.24);
+  --on-accent: #0a0b0e;
+  --orb-1: #3c4352;
+  --orb-2: #262a33;
+  --orb-3: #59616f;
+
+  --ok: #4ad89a;
+  --warn: #f3b552;
+  --bad: #f2676b;
+
+  --r: 10px;
+  --r-2: 16px;
+  --r-3: 22px;
+  --pill: 999px;
+
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --spring: linear(0, 0.0383, 0.1302, 0.2488, 0.3755, 0.4982, 0.6097, 0.7064, 0.7871, 0.8521, 0.9028, 0.9411, 0.969, 0.9884, 1.0013, 1.0091, 1.0134, 1.015, 1.015, 1.0139, 1.0122, 1.0103, 1.0084, 1.0067, 1.0051, 1.0038, 1.0027, 1.0018, 1.0011, 1.0006, 1.0003, 1.0001, 1);
+  --spring-bouncy: linear(0, 0.046, 0.1589, 0.3069, 0.4655, 0.6176, 0.7521, 0.8634, 0.9496, 1.0115, 1.0519, 1.0744, 1.0831, 1.0817, 1.0737, 1.062, 1.0489, 1.0359, 1.0241, 1.0142, 1.0063, 1.0005, 0.9966, 0.9942, 0.9932, 0.9931, 0.9936, 0.9945, 0.9956, 0.9967, 0.9977, 0.9986, 0.9993, 0.9998, 1);
+  --t-fast: 140ms;
+  --t-med: 240ms;
+  --t-slow: 520ms;
+
+  --font: "Inter", "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Yu Gothic UI", "Microsoft YaHei UI", sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, "Yu Gothic UI", "Microsoft YaHei UI", monospace;
+
+  --rail-w: 232px;
+  --bar-h: 44px;
+  --gap: 12px;
+}
+
+[data-accent="azure"]  { --accent: #4f8dff; --accent-2: #3567e8; --accent-hi: #a3c3ff; --accent-dim: rgba(79, 141, 255, 0.16); --accent-line: rgba(79, 141, 255, 0.5); --accent-glow: rgba(79, 141, 255, 0.35); --on-accent: #ffffff; --orb-1: #2a5cff; --orb-2: #3a3fc4; --orb-3: #1aa7d8; }
+[data-accent="cyan"]   { --accent: #2fb8dc; --accent-2: #1d93c4; --accent-hi: #9be4f4; --accent-dim: rgba(47, 184, 220, 0.16); --accent-line: rgba(47, 184, 220, 0.5); --accent-glow: rgba(47, 184, 220, 0.32); --on-accent: #ffffff; --orb-1: #1676c8; --orb-2: #2b4dd6; --orb-3: #18b5c8; }
+[data-accent="lime"]   { --accent: #8fd14f; --accent-2: #6db536; --accent-hi: #cdeea8; --accent-dim: rgba(143, 209, 79, 0.15); --accent-line: rgba(143, 209, 79, 0.48); --accent-glow: rgba(143, 209, 79, 0.28); --on-accent: #0b1505; --orb-1: #2a7a4c; --orb-2: #1f5a8a; --orb-3: #6aa83a; }
+[data-accent="orange"] { --accent: #ff8a3d; --accent-2: #ec6a24; --accent-hi: #ffc49c; --accent-dim: rgba(255, 138, 61, 0.15); --accent-line: rgba(255, 138, 61, 0.5); --accent-glow: rgba(255, 138, 61, 0.3); --on-accent: #ffffff; --orb-1: #c2481f; --orb-2: #8a3a2a; --orb-3: #d0812a; }
+[data-accent="white"]  { --accent: #dfe5f0; --accent-2: #c3ccdb; --accent-hi: #ffffff; --accent-dim: rgba(223, 229, 240, 0.12); --accent-line: rgba(223, 229, 240, 0.42); --accent-glow: rgba(223, 229, 240, 0.22); --on-accent: #0b1020; --orb-1: #3a4a6a; --orb-2: #4a3f6a; --orb-3: #2f5a6e; }
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--t1);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 430;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  line-height: 1.45;
+  letter-spacing: -0.003em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+}
+
+body.reduced-motion *, body.reduced-motion *::before, body.reduced-motion *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 1ms !important;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 640; letter-spacing: -0.018em; }
+h1 { font-size: 26px; line-height: 1.15; letter-spacing: -0.026em; }
+h2 { font-size: 16px; }
+h3 { font-size: 13.5px; }
+p { margin: 0; }
+a { color: var(--accent-hi); text-decoration: none; transition: color var(--t-fast); }
+a:hover { color: var(--t1); }
+button, input, select, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
+button { cursor: default; }
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--t3); }
+.muted { color: var(--t2); }
+.faint { color: var(--t3); }
+.hidden { display: none !important; }
+
+::selection { background: var(--accent-dim); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.18); }
+:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; border-radius: var(--r); }
+
+/* ------------------------------------------------------------------ ambient field
+   Three large, heavily blurred colour fields drifting very slowly behind the glass. They are
+   dim on purpose; the motion is slow enough to read as "alive" without drawing the eye.
+   Paused while scaling runs, while the window is hidden and with reduced motion. */
+.ambient { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #0d1630 0%, rgba(13, 22, 48, 0) 60%),
+    radial-gradient(90% 80% at 100% 110%, #0b1124 0%, rgba(11, 17, 36, 0) 60%),
+    var(--bg); }
+.ambient .orb { position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.32; will-change: transform; transition: background 1.2s var(--ease); }
+.ambient .o1 { width: 58vw; height: 58vw; left: -14vw; top: -22vw; background: var(--orb-1); animation: drift1 46s ease-in-out infinite alternate; }
+.ambient .o2 { width: 46vw; height: 46vw; right: -12vw; top: 18vh; background: var(--orb-2); opacity: 0.24; animation: drift2 58s ease-in-out infinite alternate; }
+.ambient .o3 { width: 52vw; height: 52vw; left: 22vw; bottom: -34vw; background: var(--orb-3); opacity: 0.2; animation: drift3 52s ease-in-out infinite alternate; }
+.ambient .grain { position: absolute; inset: 0; opacity: 0.05; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>"); }
+@keyframes drift1 { to { transform: translate3d(18vw, 14vh, 0) scale(1.12); } }
+@keyframes drift2 { to { transform: translate3d(-20vw, 10vh, 0) scale(0.9); } }
+@keyframes drift3 { to { transform: translate3d(-12vw, -16vh, 0) scale(1.08); } }
+body.calm .ambient .orb, body.reduced-motion .ambient .orb { animation-play-state: paused; }
+
+/* ------------------------------------------------------------------ glass surfaces */
+.glass, .sidebar, .panel, .chain, .set-list, .choices, .profs, .recs, .facts, .spec, .ob-steps, .lang-grid, .win-list, .tl, .note {
+  position: relative;
+  background: var(--glass-sheen), var(--glass);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(165%);
+  backdrop-filter: blur(var(--blur)) saturate(165%);
+  border: 0;
+  border-radius: var(--r-2);
+  box-shadow: var(--glass-shadow);
+}
+/* The light rim: a 1px gradient border that is brighter at the top-left, like a lit edge. */
+.glass::after, .sidebar::after, .panel::after, .chain::after, .set-list::after, .choices::after, .profs::after, .recs::after,
+.facts::after, .spec::after, .ob-steps::after, .lang-grid::after, .win-list::after, .modal::after, .engage::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; z-index: 3;
+  background: var(--glass-rim), linear-gradient(var(--glass-edge), var(--glass-edge));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+/* Nested inside a sheet, lists become plain tinted groups (no second blur pass). */
+.modal .spec, .modal .ob-steps, .modal .lang-grid, .modal .win-list, .modal .set-list, .modal .choices, .modal .note {
+  background: rgba(255, 255, 255, 0.035); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.modal .spec::after, .modal .ob-steps::after, .modal .lang-grid::after, .modal .win-list::after, .modal .set-list::after, .modal .choices::after { display: none; }

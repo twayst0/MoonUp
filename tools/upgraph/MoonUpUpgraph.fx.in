@@ -1,0 +1,689 @@
+/*
+ * MoonUp Upgraph - in-game neural rendering for ReShade
+ * =========================================================
+ *
+ * Part of MoonUp (https://moonup - local build). Installed into a game by the MoonUp
+ * "Upgraph" page together with ReShade. Runs inside the game, so it costs no capture, no
+ * overlay window and has the game's depth buffer:
+ *
+ *   1. Upgraph Neural  - MoonUp Neural Render v3: a convolutional network looks at a 256x144
+ *                        copy of the frame and predicts a bilateral grid of colour transforms
+ *                        ("tone": lighting depth, highlights, colour), and a dilated 12-channel
+ *                        network predicts shading and micro detail ("structure"). Same weights
+ *                        and maths as the MoonUp desktop engine (shaders/render.hlsl).
+ *   2. Upgraph Light   - ambient occlusion / contact shadows from the game's depth buffer,
+ *                        combined with the neural shading term.
+ *   3. Upgraph Detail  - AMD FidelityFX RCAS sharpening (MIT licence, (c) Advanced Micro
+ *                        Devices, Inc.), with noise protection.
+ *
+ * Needs DirectX 10/11/12, Vulkan or OpenGL 4.3 for the neural part (compute shaders); on older
+ * APIs only Light and Detail run. HDR output is passed through untouched.
+ * Press Home in game for the ReShade menu; every slider below is there ("MoonUpUpgraph.fx").
+ *
+ * Generated file - edit tools/upgraph/MoonUpUpgraph.fx.in and run tools/gen_upgraph.py.
+ */
+
+#ifndef BUFFER_COLOR_SPACE
+#define BUFFER_COLOR_SPACE 1
+#endif
+#ifndef RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN
+#define RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN 0
+#endif
+#ifndef RESHADE_DEPTH_INPUT_IS_LOGARITHMIC
+#define RESHADE_DEPTH_INPUT_IS_LOGARITHMIC 0
+#endif
+#ifndef RESHADE_DEPTH_LINEARIZATION_FAR_PLANE
+#define RESHADE_DEPTH_LINEARIZATION_FAR_PLANE 1000.0
+#endif
+#ifndef RESHADE_DEPTH_MULTIPLIER
+#define RESHADE_DEPTH_MULTIPLIER 1
+#endif
+
+#if (__RENDERER__ >= 0xb000 && __RENDERER__ < 0x10000) || __RENDERER__ >= 0x20000 || __RENDERER__ >= 0x14300
+#define _UG_COMPUTE 1
+#else
+#define _UG_COMPUTE 0
+#endif
+#define _UG_SDR (BUFFER_COLOR_SPACE <= 1)
+
+// ============================================================================================ UI
+uniform float Tone <
+    ui_category = "Upgraph Neural"; ui_type = "slider"; ui_min = 0.0; ui_max = 2.0; ui_step = 0.01;
+    ui_label = "Tone (lighting)";
+    ui_tooltip = "Lighting depth, local contrast and highlights predicted by the network.";
+> = 1.0;
+uniform float Color <
+    ui_category = "Upgraph Neural"; ui_type = "slider"; ui_min = 0.0; ui_max = 2.0; ui_step = 0.01;
+    ui_label = "Color (materials)";
+    ui_tooltip = "Colour and material response predicted by the network.";
+> = 0.8;
+uniform float Structure <
+    ui_category = "Upgraph Neural"; ui_type = "slider"; ui_min = 0.0; ui_max = 2.0; ui_step = 0.01;
+    ui_label = "Structure (shading, detail)";
+    ui_tooltip = "Contact shading, ambient occlusion feel and micro detail predicted by the network.";
+> = 1.0;
+uniform float Temporal <
+    ui_category = "Upgraph Neural"; ui_type = "slider"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01;
+    ui_label = "Temporal stability";
+    ui_tooltip = "How much of the look is carried between frames in static areas (less flicker).";
+> = 0.7;
+
+uniform float LightStrength <
+    ui_category = "Upgraph Light"; ui_type = "slider"; ui_min = 0.0; ui_max = 1.5; ui_step = 0.01;
+    ui_label = "Contact shadows";
+    ui_tooltip = "Ambient occlusion from the game's depth buffer. 0 = off.";
+> = 0.6;
+uniform float LightRadius <
+    ui_category = "Upgraph Light"; ui_type = "slider"; ui_min = 0.2; ui_max = 4.0; ui_step = 0.01;
+    ui_label = "Shadow radius";
+> = 1.0;
+uniform int DepthMode <
+    ui_category = "Upgraph Light"; ui_type = "combo";
+    ui_items = "Automatic\0Normal\0Reversed\0";
+    ui_label = "Depth buffer";
+    ui_tooltip = "Automatic detects reversed depth (Unreal Engine and most modern games).";
+> = 0;
+
+uniform float Sharpness <
+    ui_category = "Upgraph Detail"; ui_type = "slider"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01;
+    ui_label = "Sharpness (RCAS)";
+> = 0.35;
+
+uniform int DebugView <
+    ui_category = "Tools"; ui_type = "combo";
+    ui_items = "Off\0Split screen (left = original)\0Contact shadows\0Neural shading\0Depth\0";
+    ui_label = "View";
+> = 0;
+
+uniform bool HasDepth < source = "bufready_depth"; >;
+
+// ====================================================================================== shared
+texture2D UG_BackBufferTex : COLOR;
+texture2D UG_DepthTex : DEPTH;
+sampler2D UG_BackBuffer { Texture = UG_BackBufferTex; };
+sampler2D UG_BackBufferPoint { Texture = UG_BackBufferTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+sampler2D UG_Depth { Texture = UG_DepthTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+
+#define UG_HW ((BUFFER_WIDTH + 1) / 2)
+#define UG_HH ((BUFFER_HEIGHT + 1) / 2)
+
+float UG_Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+
+void UG_VS(in uint id : SV_VertexID, out float4 position : SV_Position, out float2 texcoord : TEXCOORD) {
+    texcoord.x = (id == 2) ? 2.0 : 0.0;
+    texcoord.y = (id == 1) ? 2.0 : 0.0;
+    position = float4(texcoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+
+// ------------------------------------------------------------------------------- depth helpers
+// Depth info (1x1): x = reversed (0/1), y = depth buffer usable (0/1).
+texture2D UG_DepthInfoTex { Width = 1; Height = 1; Format = RGBA16F; };
+sampler2D UG_DepthInfo { Texture = UG_DepthInfoTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+
+float UG_RawDepth(float2 uv) {
+#if RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN
+    uv.y = 1.0 - uv.y;
+#endif
+    float d = tex2Dlod(UG_Depth, float4(uv, 0, 0)).x * RESHADE_DEPTH_MULTIPLIER;
+#if RESHADE_DEPTH_INPUT_IS_LOGARITHMIC
+    const float C = 0.01;
+    d = (exp(d * log(C + 1.0)) - 1.0) / C;
+#endif
+    return d;
+}
+
+// Linear depth 0 (near) .. 1 (far plane / sky).
+float UG_LinearDepth(float2 uv, float reversed) {
+    float d = UG_RawDepth(uv);
+    if (reversed > 0.5) d = 1.0 - d;
+    const float N = 1.0;
+    return saturate(d / (RESHADE_DEPTH_LINEARIZATION_FAR_PLANE - d * (RESHADE_DEPTH_LINEARIZATION_FAR_PLANE - N)));
+}
+
+// Automatic depth detection: conventional depth puts almost everything close to 1, reversed depth
+// close to 0. A buffer without variation (cleared, or not the scene's) is not used.
+float4 UG_PS_DepthInfo(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float sum = 0, mn = 1, mx = 0;
+    [loop] for (int y = 0; y < 8; y++)
+        [loop] for (int x = 0; x < 8; x++) {
+            float d = UG_RawDepth(float2((x + 0.5) / 8.0, (y + 0.5) / 8.0));
+            sum += d;
+            mn = min(mn, d);
+            mx = max(mx, d);
+        }
+    float avg = sum / 64.0;
+    float reversed = DepthMode == 2 ? 1.0 : DepthMode == 1 ? 0.0 : (avg < 0.5 ? 1.0 : 0.0);
+    float usable = (HasDepth && mx - mn > 1e-4) ? 1.0 : 0.0;
+    return float4(reversed, usable, avg, 1.0);
+}
+
+// ================================================================================ Upgraph Light
+texture2D UG_AOTex { Width = UG_HW; Height = UG_HH; Format = RG16F; };
+texture2D UG_AOTmpTex { Width = UG_HW; Height = UG_HH; Format = RG16F; };
+sampler2D UG_AO { Texture = UG_AOTex; };
+sampler2D UG_AOPoint { Texture = UG_AOTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+sampler2D UG_AOTmp { Texture = UG_AOTmpTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+
+static const float UG_ASPECT = float(BUFFER_WIDTH) / float(BUFFER_HEIGHT);
+static const float UG_TANHALF = 0.70;  // ~70 degree vertical field of view
+
+float3 UG_ViewPos(float2 uv, float z) {
+    return float3((uv * 2.0 - 1.0) * float2(UG_ASPECT, -1.0) * UG_TANHALF * z, z);
+}
+
+// Scalable ambient occlusion on the linear depth buffer (half resolution, 12 spiral taps with a
+// per-pixel rotation, removed by the depth-aware blur). Output: x = visibility, y = linear depth.
+float2 UG_PS_AO(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float4 info = tex2Dfetch(UG_DepthInfo, int2(0, 0));
+    float z = UG_LinearDepth(uv, info.x);
+    if (info.y < 0.5 || z > 0.995 || LightStrength <= 0.001) return float2(1.0, z);
+    float3 P = UG_ViewPos(uv, z);
+    // normal from the smaller of the two neighbour differences (no halos at silhouettes)
+    float2 px = float2(2.0 * BUFFER_RCP_WIDTH, 2.0 * BUFFER_RCP_HEIGHT);
+    float3 Pr = UG_ViewPos(uv + float2(px.x, 0), UG_LinearDepth(uv + float2(px.x, 0), info.x));
+    float3 Pl = UG_ViewPos(uv - float2(px.x, 0), UG_LinearDepth(uv - float2(px.x, 0), info.x));
+    float3 Pd = UG_ViewPos(uv + float2(0, px.y), UG_LinearDepth(uv + float2(0, px.y), info.x));
+    float3 Pu = UG_ViewPos(uv - float2(0, px.y), UG_LinearDepth(uv - float2(0, px.y), info.x));
+    float3 dx = abs(Pr.z - P.z) < abs(P.z - Pl.z) ? Pr - P : P - Pl;
+    float3 dy = abs(Pd.z - P.z) < abs(P.z - Pu.z) ? Pd - P : P - Pu;
+    float3 N = normalize(cross(dy, dx));
+    if (N.z > 0) N = -N;
+
+    float radius = 0.012 * LightRadius;               // in view units (depth space)
+    float screenR = radius / (z * UG_TANHALF * 2.0);  // in uv units
+    screenR = clamp(screenR, 3.0 * BUFFER_RCP_HEIGHT, 0.12);
+    // interleaved gradient noise rotation
+    float rot = 6.2831853 * frac(52.9829189 * frac(dot(pos.xy, float2(0.06711056, 0.00583715))));
+    float occ = 0;
+    [unroll] for (int i = 0; i < 12; i++) {
+        float t = (i + 0.5) / 12.0;
+        float a = rot + i * 2.3999632;  // golden angle
+        float2 o = float2(cos(a), sin(a)) * t * screenR * float2(1.0 / UG_ASPECT, 1.0);
+        float2 suv = uv + o;
+        float sz = UG_LinearDepth(suv, info.x);
+        float3 v = UG_ViewPos(suv, sz) - P;
+        float vv = dot(v, v);
+        float vn = dot(v, N);
+        float falloff = saturate(1.0 - vv / (radius * radius * 4.0));
+        occ += max(0.0, vn * rsqrt(vv + 1e-10) - 0.08) * falloff;
+    }
+    occ /= 12.0;
+    float vis = saturate(1.0 - 1.6 * occ);
+    return float2(vis, z);
+}
+
+float2 UG_Blur(sampler2D s, float2 uv, float2 dir) {
+    float2 c = tex2Dlod(s, float4(uv, 0, 0)).xy;
+    float sum = c.x, wsum = 1.0;
+    [unroll] for (int i = -4; i <= 4; i++) {
+        if (i == 0) continue;
+        float2 v = tex2Dlod(s, float4(uv + dir * i, 0, 0)).xy;
+        float w = exp(-i * i / 8.0) * exp(-abs(v.y - c.y) / max(c.y * 0.02, 1e-4));
+        sum += v.x * w;
+        wsum += w;
+    }
+    return float2(sum / wsum, c.y);
+}
+float2 UG_PS_BlurH(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    return UG_Blur(UG_AOPoint, uv, float2(2.0 * BUFFER_RCP_WIDTH, 0));
+}
+float2 UG_PS_BlurV(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    return UG_Blur(UG_AOTmp, uv, float2(0, 2.0 * BUFFER_RCP_HEIGHT));
+}
+
+#if _UG_COMPUTE && _UG_SDR
+// =============================================================================== Upgraph Neural
+// Tone network weights (154,562 float32 values) are stored bit-exact in an RGBA8 PNG: one float
+// per pixel, little-endian bytes in R, G, B, A.
+texture2D UG_WeightsTex < source = "moonup_upgraph_weights.png"; > { Width = 512; Height = /*@@WH@@*/; Format = RGBA8; };
+sampler2D UG_Weights { Texture = UG_WeightsTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+
+float UG_W(int i) {
+    float4 v = tex2Dfetch(UG_Weights, int2(i & 511, i >> 9));
+    uint4 b = uint4(v * 255.0 + 0.5);
+    return asfloat(b.x | (b.y << 8) | (b.z << 16) | (b.w << 24));
+}
+
+/*@@OFFSETS@@*/
+
+// ---------------------------------------------------------------------------- textures
+#define UG_TEX(name, w, h, fmt) texture2D name##Tex { Width = w; Height = h; Format = fmt; }; \
+    sampler2D name { Texture = name##Tex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; }; \
+    storage2D name##St { Texture = name##Tex; };
+
+UG_TEX(UG_Low, 256, 144, RGBA16F)
+UG_TEX(UG_LowPrev, 256, 144, RGBA16F)
+UG_TEX(UG_F1, 512, 72, RGBA16F)     // 128 x 72 x 16 (4 slices side by side)
+UG_TEX(UG_F2, 512, 36, RGBA16F)     // 64 x 36 x 32 (8 slices)
+UG_TEX(UG_F3, 512, 18, RGBA16F)     // 32 x 18 x 64 (16 slices)
+UG_TEX(UG_F4, 256, 9, RGBA16F)      // 16 x 9 x 64 (16 slices)
+UG_TEX(UG_F5, 256, 9, RGBA16F)
+UG_TEX(UG_F6, 256, 9, RGBA16F)
+UG_TEX(UG_Global, 16, 1, RGBA32F)   // 64 global features
+UG_TEX(UG_Grid, 128, 27, RGBA16F)   // 3 rows of (16 x 9 cells, 8 bins side by side)
+UG_TEX(UG_GridPrev, 128, 27, RGBA16F)
+UG_TEX(UG_State, 1, 1, RGBA16F)     // x = temporal history valid
+UG_TEX(UG_Half, UG_HW, UG_HH, R16F)
+UG_TEX(UG_HalfPrev, UG_HW, UG_HH, R16F)
+UG_TEX(UG_SA, UG_HW * 3, UG_HH, RGBA16F)
+UG_TEX(UG_SB, UG_HW * 3, UG_HH, RGBA16F)
+UG_TEX(UG_SRaw, UG_HW, UG_HH, RG16F)
+UG_TEX(UG_SMapPrev, UG_HW, UG_HH, RG16F)
+texture2D UG_SMapTex { Width = UG_HW; Height = UG_HH; Format = RG16F; };
+sampler2D UG_SMap { Texture = UG_SMapTex; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+sampler2D UG_SMapLinear { Texture = UG_SMapTex; };
+storage2D UG_SMapSt { Texture = UG_SMapTex; };
+
+// ------------------------------------------------------------------- 1. low resolution input
+void UG_CS_DownIn(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 256 || id.y >= 144) return;
+    float2 fp = float2(BUFFER_WIDTH, BUFFER_HEIGHT) / float2(256.0, 144.0);
+    float2 base = float2(id.xy) * fp;
+    float3 s = 0;
+    [unroll] for (int j = 0; j < 4; j++)
+        [unroll] for (int i = 0; i < 4; i++) {
+            float2 p = base + (float2(i, j) + 0.5) * fp * 0.25;
+            s += tex2Dlod(UG_BackBuffer, float4(p * float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT), 0, 0)).rgb;
+        }
+    tex2Dstore(UG_LowSt, int2(id.xy), float4(saturate(s / 16.0), 0));
+}
+
+// ------------------------------------------------------------------- 2. tone convolutions
+// 3x3 convolution, edge clamped, stride 1 or 2. Inputs: 'slices' 4-channel tiles of inW x inH side
+// by side. Each thread computes 4 output channels (id.z = output slice).
+float4 UG_Fetch(sampler2D s, int2 p, int sl, int inW, int inH) {
+    p = clamp(p, int2(0, 0), int2(inW - 1, inH - 1));
+    return tex2Dfetch(s, int2(p.x + sl * inW, p.y));
+}
+
+float4 UG_Conv(sampler2D s, int inW, int inH, int cin, int2 c0, int co, int wOff, int bOff) {
+    float4 acc = float4(UG_W(bOff + co), UG_W(bOff + co + 1), UG_W(bOff + co + 2), UG_W(bOff + co + 3));
+    int perOut = cin * 9;
+    int slices = (cin + 3) / 4;
+    [loop] for (int sl = 0; sl < slices; sl++) {
+        int cs = min(cin - sl * 4, 4);
+        [loop] for (int tap = 0; tap < 9; tap++) {
+            float4 v = UG_Fetch(s, c0 + int2(tap % 3 - 1, tap / 3 - 1), sl, inW, inH);
+            [unroll] for (int k = 0; k < 4; k++) {
+                if (k < cs) {
+                    float x = k == 0 ? v.x : k == 1 ? v.y : k == 2 ? v.z : v.w;
+                    int w = wOff + (sl * 4 + k) * 9 + tap;
+                    acc.x += x * UG_W(w + co * perOut);
+                    acc.y += x * UG_W(w + (co + 1) * perOut);
+                    acc.z += x * UG_W(w + (co + 2) * perOut);
+                    acc.w += x * UG_W(w + (co + 3) * perOut);
+                }
+            }
+        }
+    }
+    return acc;
+}
+
+void UG_CS_C1(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 128 || id.y >= 72) return;
+    // c1 has 3 input channels (rgb of the low resolution copy)
+    int co = int(id.z) * 4;
+    float4 acc = float4(UG_W(UG_c1b + co), UG_W(UG_c1b + co + 1), UG_W(UG_c1b + co + 2), UG_W(UG_c1b + co + 3));
+    int2 c0 = int2(id.xy) * 2;
+    [unroll] for (int ky = 0; ky < 3; ky++)
+        [unroll] for (int kx = 0; kx < 3; kx++) {
+            float4 v = UG_Fetch(UG_Low, c0 + int2(kx - 1, ky - 1), 0, 256, 144);
+            int tap = ky * 3 + kx;
+            [unroll] for (int k = 0; k < 3; k++) {
+                float x = k == 0 ? v.x : k == 1 ? v.y : v.z;
+                int w = UG_c1w + k * 9 + tap;
+                acc.x += x * UG_W(w + co * 27);
+                acc.y += x * UG_W(w + (co + 1) * 27);
+                acc.z += x * UG_W(w + (co + 2) * 27);
+                acc.w += x * UG_W(w + (co + 3) * 27);
+            }
+        }
+    tex2Dstore(UG_F1St, int2(id.x + id.z * 128, id.y), max(acc, 0));
+}
+void UG_CS_C2(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 64 || id.y >= 36) return;
+    float4 a = UG_Conv(UG_F1, 128, 72, 16, int2(id.xy) * 2, int(id.z) * 4, UG_c2w, UG_c2b);
+    tex2Dstore(UG_F2St, int2(id.x + id.z * 64, id.y), max(a, 0));
+}
+void UG_CS_C3(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 32 || id.y >= 18) return;
+    float4 a = UG_Conv(UG_F2, 64, 36, 32, int2(id.xy) * 2, int(id.z) * 4, UG_c3w, UG_c3b);
+    tex2Dstore(UG_F3St, int2(id.x + id.z * 32, id.y), max(a, 0));
+}
+void UG_CS_C4(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 16 || id.y >= 9) return;
+    float4 a = UG_Conv(UG_F3, 32, 18, 64, int2(id.xy) * 2, int(id.z) * 4, UG_c4w, UG_c4b);
+    tex2Dstore(UG_F4St, int2(id.x + id.z * 16, id.y), max(a, 0));
+}
+void UG_CS_C5(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 16 || id.y >= 9) return;
+    float4 a = UG_Conv(UG_F4, 16, 9, 64, int2(id.xy), int(id.z) * 4, UG_c5w, UG_c5b);
+    tex2Dstore(UG_F5St, int2(id.x + id.z * 16, id.y), max(a, 0));
+}
+void UG_CS_C6(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 16 || id.y >= 9) return;
+    float4 a = UG_Conv(UG_F5, 16, 9, 64, int2(id.xy), int(id.z) * 4, UG_c6w, UG_c6b);
+    tex2Dstore(UG_F6St, int2(id.x + id.z * 16, id.y), a);
+}
+
+// ------------------------------------------------------------------- 3. global path
+groupshared float UG_gsMean[64];
+groupshared float UG_gsHidden[64];
+
+float UG_Chan(float4 v, int k) { return k == 0 ? v.x : k == 1 ? v.y : k == 2 ? v.z : v.w; }
+
+void UG_CS_Global(uint3 gtid : SV_GroupThreadID) {
+    int c = int(gtid.x);
+    float s = 0;
+    [loop] for (int y = 0; y < 9; y++)
+        [loop] for (int x = 0; x < 16; x++) s += UG_Chan(tex2Dfetch(UG_F4, int2(x + (c >> 2) * 16, y)), c & 3);
+    UG_gsMean[c] = s / 144.0;
+    barrier();
+    float h = UG_W(UG_f1b + c);
+    [loop] for (int i = 0; i < 64; i++) h += UG_W(UG_f1w + c * 64 + i) * UG_gsMean[i];
+    UG_gsHidden[c] = max(h, 0);
+    barrier();
+    float o = UG_W(UG_f2b + c);
+    [loop] for (int k = 0; k < 64; k++) o += UG_W(UG_f2w + c * 64 + k) * UG_gsHidden[k];
+    UG_gsMean[c] = o;
+    barrier();
+    if ((c & 3) == 0) tex2Dstore(UG_GlobalSt, int2(c >> 2, 0), float4(UG_gsMean[c], UG_gsMean[c + 1], UG_gsMean[c + 2], UG_gsMean[c + 3]));
+}
+
+// ------------------------------------------------------------------- 4. fuse -> grid (+ temporal)
+void UG_CS_Fuse(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= 16 || id.y >= 9) return;
+    float f[64];
+    [unroll] for (int s = 0; s < 16; s++) {
+        float4 v = tex2Dfetch(UG_F6, int2(id.x + s * 16, id.y));
+        float4 g = tex2Dfetch(UG_Global, int2(s, 0));
+        f[s * 4 + 0] = max(v.x + g.x, 0);
+        f[s * 4 + 1] = max(v.y + g.y, 0);
+        f[s * 4 + 2] = max(v.z + g.z, 0);
+        f[s * 4 + 3] = max(v.w + g.w, 0);
+    }
+    bool hasPrev = tex2Dfetch(UG_State, int2(0, 0)).x > 0.5;
+    float alpha = 1.0;
+    if (hasPrev) {
+        int2 lo = int2(id.xy) * 16;
+        float d = 0;
+        int n = 0;
+        [loop] for (int y = lo.y; y < min(lo.y + 16, 144); y += 2)
+            [loop] for (int x = lo.x; x < min(lo.x + 16, 256); x += 2) {
+                float3 a = tex2Dfetch(UG_Low, int2(x, y)).rgb, b = tex2Dfetch(UG_LowPrev, int2(x, y)).rgb;
+                d += abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b);
+                n++;
+            }
+        d /= max(n * 3, 1);
+        alpha = lerp(1.0 - saturate(Temporal) * 0.75, 1.0, saturate((d - 0.015) / 0.06));
+    }
+    [loop] for (int bin = 0; bin < 8; bin++) {
+        float o[12];
+        [unroll] for (int j = 0; j < 12; j++) {
+            int k = bin * 12 + j;
+            float a = UG_W(UG_ob + k);
+            [loop] for (int i = 0; i < 64; i++) a += UG_W(UG_ow + k * 64 + i) * f[i];
+            o[j] = a;
+        }
+        int2 c0 = int2(bin * 16 + id.x, id.y);
+        float4 g0 = float4(o[0], o[1], o[2], o[3]);
+        float4 g1 = float4(o[4], o[5], o[6], o[7]);
+        float4 g2 = float4(o[8], o[9], o[10], o[11]);
+        if (hasPrev) {
+            g0 = lerp(tex2Dfetch(UG_GridPrev, c0), g0, alpha);
+            g1 = lerp(tex2Dfetch(UG_GridPrev, c0 + int2(0, 9)), g1, alpha);
+            g2 = lerp(tex2Dfetch(UG_GridPrev, c0 + int2(0, 18)), g2, alpha);
+        }
+        tex2Dstore(UG_GridSt, c0, g0);
+        tex2Dstore(UG_GridSt, c0 + int2(0, 9), g1);
+        tex2Dstore(UG_GridSt, c0 + int2(0, 18), g2);
+    }
+}
+
+// ------------------------------------------------------------------- 5. structure network
+/*@@STRUCT_WEIGHTS@@*/
+
+void UG_CS_DownHalf(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= UG_HW || id.y >= UG_HH) return;
+    float2 uv = (float2(id.xy) * 2.0 + 1.0) * float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT);
+    tex2Dstore(UG_HalfSt, int2(id.xy), float4(UG_Luma(tex2Dlod(UG_BackBuffer, float4(uv, 0, 0)).rgb), 0, 0, 0));
+}
+
+void UG_LoadS12(sampler2D s, int2 p, out float f[12]) {
+    p = clamp(p, int2(0, 0), int2(UG_HW - 1, UG_HH - 1));
+    float4 a = tex2Dfetch(s, p), b = tex2Dfetch(s, p + int2(UG_HW, 0)), c = tex2Dfetch(s, p + int2(UG_HW * 2, 0));
+    f[0] = a.x; f[1] = a.y; f[2] = a.z; f[3] = a.w;
+    f[4] = b.x; f[5] = b.y; f[6] = b.z; f[7] = b.w;
+    f[8] = c.x; f[9] = c.y; f[10] = c.z; f[11] = c.w;
+}
+
+void UG_CS_S1(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= UG_HW || id.y >= UG_HH) return;
+    float x[9];
+    [unroll] for (int k = 0; k < 9; k++) {
+        int2 p = clamp(int2(id.xy) + int2(k % 3 - 1, k / 3 - 1), int2(0, 0), int2(UG_HW - 1, UG_HH - 1));
+        x[k] = tex2Dfetch(UG_Half, p).x;
+    }
+    float o[12];
+    [unroll] for (int c = 0; c < 12; c++) {
+        float s = UG_S1[108 + c];
+        [unroll] for (int k2 = 0; k2 < 9; k2++) s += UG_S1[c * 9 + k2] * x[k2];
+        o[c] = max(s, 0.0);
+    }
+    int2 p0 = int2(id.xy);
+    tex2Dstore(UG_SASt, p0, float4(o[0], o[1], o[2], o[3]));
+    tex2Dstore(UG_SASt, p0 + int2(UG_HW, 0), float4(o[4], o[5], o[6], o[7]));
+    tex2Dstore(UG_SASt, p0 + int2(UG_HW * 2, 0), float4(o[8], o[9], o[10], o[11]));
+}
+
+#define UG_STRUCT_MID(NAME, SRC, DST, WTS, DIL) \
+void NAME(uint3 id : SV_DispatchThreadID) { \
+    if (id.x >= UG_HW || id.y >= UG_HH) return; \
+    float acc[12]; \
+    [unroll] for (int c = 0; c < 12; c++) acc[c] = WTS[1296 + c]; \
+    [unroll] for (int k = 0; k < 9; k++) { \
+        float f[12]; \
+        UG_LoadS12(SRC, int2(id.xy) + int2(k % 3 - 1, k / 3 - 1) * DIL, f); \
+        [unroll] for (int o = 0; o < 12; o++) { \
+            [unroll] for (int i = 0; i < 12; i++) acc[o] += WTS[(o * 12 + i) * 9 + k] * f[i]; \
+        } \
+    } \
+    int2 p0 = int2(id.xy); \
+    tex2Dstore(DST, p0, max(float4(acc[0], acc[1], acc[2], acc[3]), 0)); \
+    tex2Dstore(DST, p0 + int2(UG_HW, 0), max(float4(acc[4], acc[5], acc[6], acc[7]), 0)); \
+    tex2Dstore(DST, p0 + int2(UG_HW * 2, 0), max(float4(acc[8], acc[9], acc[10], acc[11]), 0)); \
+}
+UG_STRUCT_MID(UG_CS_S2, UG_SA, UG_SBSt, UG_S2, 2)
+UG_STRUCT_MID(UG_CS_S3, UG_SB, UG_SASt, UG_S3, 4)
+UG_STRUCT_MID(UG_CS_S4, UG_SA, UG_SBSt, UG_S4, 8)
+UG_STRUCT_MID(UG_CS_S5, UG_SB, UG_SASt, UG_S5, 1)
+
+void UG_CS_S6(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= UG_HW || id.y >= UG_HH) return;
+    float acc0 = UG_S6[216], acc1 = UG_S6[217];
+    [unroll] for (int k = 0; k < 9; k++) {
+        float f[12];
+        UG_LoadS12(UG_SA, int2(id.xy) + int2(k % 3 - 1, k / 3 - 1), f);
+        [unroll] for (int i = 0; i < 12; i++) {
+            acc0 += UG_S6[i * 9 + k] * f[i];
+            acc1 += UG_S6[(12 + i) * 9 + k] * f[i];
+        }
+    }
+    tex2Dstore(UG_SRawSt, int2(id.xy), float4(acc0, acc1, 0, 0));
+}
+
+void UG_CS_StructBlend(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= UG_HW || id.y >= UG_HH) return;
+    float4 cur = tex2Dfetch(UG_SRaw, int2(id.xy));
+    if (tex2Dfetch(UG_State, int2(0, 0)).x > 0.5) {
+        float d = 0;
+        [unroll] for (int j = -1; j <= 1; j++)
+            [unroll] for (int i = -1; i <= 1; i++) {
+                int2 p = clamp(int2(id.xy) + int2(i, j), int2(0, 0), int2(UG_HW - 1, UG_HH - 1));
+                d = max(d, abs(tex2Dfetch(UG_Half, p).x - tex2Dfetch(UG_HalfPrev, p).x));
+            }
+        float alpha = lerp(1.0 - saturate(Temporal) * 0.6, 1.0, saturate((d - 0.008) / 0.04));
+        cur = lerp(tex2Dfetch(UG_SMapPrev, int2(id.xy)), cur, alpha);
+    }
+    tex2Dstore(UG_SMapSt, int2(id.xy), cur);
+}
+
+// ------------------------------------------------------------------- 6. history for next frame
+void UG_CS_Keep(uint3 id : SV_DispatchThreadID) {
+    int2 p = int2(id.xy);
+    if (p.x < 256 && p.y < 144) tex2Dstore(UG_LowPrevSt, p, tex2Dfetch(UG_Low, p));
+    if (p.x < 128 && p.y < 27) tex2Dstore(UG_GridPrevSt, p, tex2Dfetch(UG_Grid, p));
+    if (p.x < UG_HW && p.y < UG_HH) {
+        tex2Dstore(UG_HalfPrevSt, p, tex2Dfetch(UG_Half, p));
+        tex2Dstore(UG_SMapPrevSt, p, tex2Dfetch(UG_SMap, p));
+    }
+    if (p.x == 0 && p.y == 0) tex2Dstore(UG_StateSt, p, float4(1, 0, 0, 0));
+}
+
+// Guide: learned per-pixel brightness coordinate into the grid.
+/*@@GUIDE@@*/
+float UG_Guide(float3 rgb) {
+    float3 y;
+    y.x = UG_G[0] * rgb.r + UG_G[1] * rgb.g + UG_G[2] * rgb.b + UG_G[9];
+    y.y = UG_G[3] * rgb.r + UG_G[4] * rgb.g + UG_G[5] * rgb.b + UG_G[10];
+    y.z = UG_G[6] * rgb.r + UG_G[7] * rgb.g + UG_G[8] * rgb.b + UG_G[11];
+    float g = UG_G[63];
+    [unroll] for (int c = 0; c < 3; c++) {
+        float v = c == 0 ? y.x : c == 1 ? y.y : y.z;
+        float cv = 0;
+        [unroll] for (int k = 0; k < 16; k++) cv += max(v - k / 16.0, 0) * UG_G[12 + c * 16 + k];
+        g += cv * UG_G[60 + c];
+    }
+    return saturate(g);
+}
+
+// Trilinear lookup of the 16 x 9 x 8 grid (same coordinates as a clamped 3D texture sample).
+float4 UG_GridAt(int row, float2 uv, float g) {
+    float u = clamp(uv.x * 16.0 - 0.5, 0.0, 15.0), v = clamp(uv.y * 9.0 - 0.5, 0.0, 8.0), w = clamp(g * 8.0 - 0.5, 0.0, 7.0);
+    int u0 = int(u), v0 = int(v), w0 = int(w);
+    int u1 = min(u0 + 1, 15), v1 = min(v0 + 1, 8), w1 = min(w0 + 1, 7);
+    float fu = u - u0, fv = v - v0, fw = w - w0;
+    int r = row * 9;
+    float4 a = lerp(lerp(tex2Dfetch(UG_Grid, int2(w0 * 16 + u0, r + v0)), tex2Dfetch(UG_Grid, int2(w0 * 16 + u1, r + v0)), fu),
+                    lerp(tex2Dfetch(UG_Grid, int2(w0 * 16 + u0, r + v1)), tex2Dfetch(UG_Grid, int2(w0 * 16 + u1, r + v1)), fu), fv);
+    float4 b = lerp(lerp(tex2Dfetch(UG_Grid, int2(w1 * 16 + u0, r + v0)), tex2Dfetch(UG_Grid, int2(w1 * 16 + u1, r + v0)), fu),
+                    lerp(tex2Dfetch(UG_Grid, int2(w1 * 16 + u0, r + v1)), tex2Dfetch(UG_Grid, int2(w1 * 16 + u1, r + v1)), fu), fv);
+    return lerp(a, b, fw);
+}
+#endif  // compute
+
+// ================================================================================ apply passes
+float UG_LumaAt(int2 p) {
+    p = clamp(p, int2(0, 0), int2(BUFFER_WIDTH - 1, BUFFER_HEIGHT - 1));
+    return UG_Luma(tex2Dfetch(UG_BackBufferPoint, p).rgb);
+}
+
+float3 UG_PS_Apply(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    int2 p = int2(pos.xy);
+    float3 rgb = tex2Dfetch(UG_BackBufferPoint, p).rgb;
+#if !_UG_SDR
+    return rgb;
+#else
+    float3 result = rgb;
+    float shade = 1.0;
+#if _UG_COMPUTE
+    // Tone: bilateral grid lookup, lighting (luminance) and colour (chroma) mixed separately.
+    float g = UG_Guide(rgb);
+    float4 a0 = UG_GridAt(0, uv, g), a1 = UG_GridAt(1, uv, g), a2 = UG_GridAt(2, uv, g);
+    float3 o = saturate(float3(dot(a0.xyz, rgb) + a0.w, dot(a1.xyz, rgb) + a1.w, dot(a2.xyz, rgb) + a2.w));
+    float3 delta = o - rgb;
+    float dl = UG_Luma(delta);
+    float3 toned = rgb + Tone * dl + Color * (delta - dl);
+    // Structure: shading (multiplicative, log domain) and detail (luma high-pass gain).
+    float2 m = tex2Dlod(UG_SMapLinear, float4(uv, 0, 0)).xy;
+    float sa = clamp(m.x, -1.5, 1.0);
+    float sk = clamp(m.y, -1.0, 3.0);
+    float hc = 0;
+    [unroll] for (int j = -1; j <= 1; j++)
+        [unroll] for (int i = -1; i <= 1; i++) hc += UG_LumaAt(p + int2(i, j)) * ((i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0));
+    float hp = UG_Luma(rgb) - hc / 16.0;
+    shade = exp(Structure * sa);
+    result = toned * shade + Structure * sk * hp;
+#endif
+    // Light: depth based contact shadows, faded out in the distance and on the sky.
+    float2 ao = tex2Dlod(UG_AO, float4(uv, 0, 0)).xy;
+    float vis = lerp(1.0, ao.x, saturate(LightStrength) * saturate((1.0 - ao.y) * 4.0));
+    if (LightStrength > 1.0) vis = pow(vis, LightStrength);
+    result *= vis;
+
+    if (DebugView == 1 && uv.x < 0.5) result = rgb;
+    if (DebugView == 2) result = vis.xxx;
+    if (DebugView == 3) result = saturate(shade * 0.5).xxx;
+    if (DebugView == 4) result = tex2Dlod(UG_AO, float4(uv, 0, 0)).yyy;
+    return saturate(result);
+#endif
+}
+
+// AMD FidelityFX RCAS (Robust Contrast Adaptive Sharpening), FSR 1.0. MIT licence,
+// Copyright (c) 2021 Advanced Micro Devices, Inc. Ported to ReShade FX.
+float3 UG_PS_Rcas(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    int2 sp = int2(pos.xy);
+    int2 mx = int2(BUFFER_WIDTH - 1, BUFFER_HEIGHT - 1);
+    float3 b = tex2Dfetch(UG_BackBufferPoint, clamp(sp + int2(0, -1), int2(0, 0), mx)).rgb;
+    float3 d = tex2Dfetch(UG_BackBufferPoint, clamp(sp + int2(-1, 0), int2(0, 0), mx)).rgb;
+    float3 e = tex2Dfetch(UG_BackBufferPoint, sp).rgb;
+    float3 f = tex2Dfetch(UG_BackBufferPoint, clamp(sp + int2(1, 0), int2(0, 0), mx)).rgb;
+    float3 h = tex2Dfetch(UG_BackBufferPoint, clamp(sp + int2(0, 1), int2(0, 0), mx)).rgb;
+#if !_UG_SDR
+    return e;
+#else
+    if (Sharpness <= 0.001 || (DebugView == 1 && uv.x < 0.5) || DebugView >= 2) return e;
+    float bL = b.b * 0.5 + (b.r * 0.5 + b.g);
+    float dL = d.b * 0.5 + (d.r * 0.5 + d.g);
+    float eL = e.b * 0.5 + (e.r * 0.5 + e.g);
+    float fL = f.b * 0.5 + (f.r * 0.5 + f.g);
+    float hL = h.b * 0.5 + (h.r * 0.5 + h.g);
+    float nz = 0.25 * bL + 0.25 * dL + 0.25 * fL + 0.25 * hL - eL;
+    nz = saturate(abs(nz) * rcp(max(max(max(bL, dL), max(eL, fL)), hL) - min(min(min(bL, dL), min(eL, fL)), hL) + 1e-6));
+    nz = -0.5 * nz + 1.0;
+    float3 mn4 = min(min(min(b, d), f), h);
+    float3 mx4 = max(max(max(b, d), f), h);
+    float3 hitMin = min(mn4, e) * rcp(4.0 * mx4 + 1e-6);
+    float3 hitMax = (1.0 - max(mx4, e)) * rcp(4.0 * mn4 - 4.0 - 1e-6);
+    float3 lobeRGB = max(-hitMin, hitMax);
+    float sharp = exp2(-2.0 * (1.0 - saturate(Sharpness)));
+    float lobe = max(-0.1875, min(max(max(lobeRGB.r, lobeRGB.g), lobeRGB.b), 0.0)) * sharp * nz;
+    return saturate((lobe * (b + d + h + f) + e) * rcp(4.0 * lobe + 1.0));
+#endif
+}
+
+// ================================================================================== technique
+technique MoonUpUpgraph <
+    ui_label = "MoonUp Upgraph";
+    ui_tooltip = "MoonUp neural rendering: Neural tone/structure network, depth contact shadows and RCAS detail.\n"
+                 "Sliders: Home key menu > MoonUpUpgraph.fx";
+> {
+    pass DepthInfo { VertexShader = UG_VS; PixelShader = UG_PS_DepthInfo; RenderTarget = UG_DepthInfoTex; }
+    pass AO { VertexShader = UG_VS; PixelShader = UG_PS_AO; RenderTarget = UG_AOTex; }
+    pass AOBlurH { VertexShader = UG_VS; PixelShader = UG_PS_BlurH; RenderTarget = UG_AOTmpTex; }
+    pass AOBlurV { VertexShader = UG_VS; PixelShader = UG_PS_BlurV; RenderTarget = UG_AOTex; }
+#if _UG_COMPUTE && _UG_SDR
+    pass DownIn { ComputeShader = UG_CS_DownIn<8, 8>; DispatchSizeX = 32; DispatchSizeY = 18; }
+    pass C1 { ComputeShader = UG_CS_C1<8, 8>; DispatchSizeX = 16; DispatchSizeY = 9; DispatchSizeZ = 4; }
+    pass C2 { ComputeShader = UG_CS_C2<8, 8>; DispatchSizeX = 8; DispatchSizeY = 5; DispatchSizeZ = 8; }
+    pass C3 { ComputeShader = UG_CS_C3<8, 8>; DispatchSizeX = 4; DispatchSizeY = 3; DispatchSizeZ = 16; }
+    pass C4 { ComputeShader = UG_CS_C4<8, 8>; DispatchSizeX = 2; DispatchSizeY = 2; DispatchSizeZ = 16; }
+    pass C5 { ComputeShader = UG_CS_C5<8, 8>; DispatchSizeX = 2; DispatchSizeY = 2; DispatchSizeZ = 16; }
+    pass C6 { ComputeShader = UG_CS_C6<8, 8>; DispatchSizeX = 2; DispatchSizeY = 2; DispatchSizeZ = 16; }
+    pass Global { ComputeShader = UG_CS_Global<64, 1>; DispatchSizeX = 1; DispatchSizeY = 1; }
+    pass Fuse { ComputeShader = UG_CS_Fuse<4, 4>; DispatchSizeX = 4; DispatchSizeY = 3; }
+    pass DownHalf { ComputeShader = UG_CS_DownHalf<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass S1 { ComputeShader = UG_CS_S1<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass S2 { ComputeShader = UG_CS_S2<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass S3 { ComputeShader = UG_CS_S3<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass S4 { ComputeShader = UG_CS_S4<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass S5 { ComputeShader = UG_CS_S5<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass S6 { ComputeShader = UG_CS_S6<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+    pass StructBlend { ComputeShader = UG_CS_StructBlend<8, 8>; DispatchSizeX = (UG_HW + 7) / 8; DispatchSizeY = (UG_HH + 7) / 8; }
+#endif
+#if _UG_COMPUTE && _UG_SDR
+    pass Keep { ComputeShader = UG_CS_Keep<8, 8>; DispatchSizeX = (UG_HW + 255 + 7) / 8; DispatchSizeY = (UG_HH + 143 + 7) / 8; }
+#endif
+    pass Apply { VertexShader = UG_VS; PixelShader = UG_PS_Apply; }
+    pass Detail { VertexShader = UG_VS; PixelShader = UG_PS_Rcas; }
+}
