@@ -29,7 +29,7 @@ using Microsoft::WRL::ComPtr;
 namespace sw {
 
 constexpr const wchar_t* kAppName = L"MoonUp";
-constexpr const char* kVersion = "1.0.0";
+constexpr const char* kVersion = "1.0.1";
 
 // ---------------------------------------------------------------- strings
 std::string Utf8(const std::wstring& w);

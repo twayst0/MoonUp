@@ -168,7 +168,17 @@ public:
             r.lost = true;
             return r;
         }
+        if (dst != lastDst_) {
+            lastDst_ = dst;  // new destination (resized): it needs the current image again
+            copiedId_ = UINT64_MAX;
+            uncopiedUnique_ = true;
+        }
+        const bool sampled = !dirtyRegions_;  // no dirty regions (Windows 10 ...): compare samples
+        if (sampled) ResolveSamples(r);
+
         IDirect3D11CaptureFrame* frame = nullptr;
+        int frameSlot = -1;
+        double frameTime = 0;
         for (;;) {
             IDirect3D11CaptureFrame* next = nullptr;
             HRESULT hr = pool_->TryGetNextFrame((void**)&next);
@@ -177,13 +187,18 @@ public:
                 break;
             }
             if (!next) break;
-            // Windows can deliver the same image many times (seen: 500 capture frames per second
-            // for a game rendering 47). Only frames whose pixels changed are new game frames.
-            bool raw = ContentChanged(next);
-            bool changed = raw || !trustDirty_;
-            // Safety: a whole second of frames without any reported change means the dirty regions
-            // cannot be trusted on this system (or the image is static): count every frame then.
-            if (dirtyRegions_) {
+            INT64 rel = 0;
+            next->SystemRelativeTime(&rel);
+            double t = (double)rel / 1e7, now = NowSeconds();
+            t = (t > 0 && std::abs(now - t) < 1.0) ? t : now;
+            if (sampled) {
+                // Decided a few milliseconds later (ResolveSamples), without ever waiting for the GPU.
+                frameSlot = IssueSample(next, t);
+            } else {
+                // Windows can deliver the same image many times (seen: 500 capture frames per
+                // second for a game rendering 47). Only frames whose pixels changed are new frames.
+                bool raw = ContentChanged(next);
+                bool changed = raw || !trustDirty_;
                 double nowT = NowSeconds();
                 if (checkT0_ == 0) checkT0_ = nowT;
                 checkAll_++;
@@ -195,81 +210,53 @@ public:
                     checkT0_ = nowT;
                     checkAll_ = checkChanged_ = 0;
                 }
+                if (changed) {
+                    r.frames++;
+                    contentId_++;
+                    contentTime_ = t;
+                }
             }
-            if (changed) {
-                r.frames++;
-                contentId_++;
-                INT64 rel = 0;
-                next->SystemRelativeTime(&rel);
-                double t = (double)rel / 1e7, now = NowSeconds();
-                contentTime_ = (t > 0 && std::abs(now - t) < 1.0) ? t : now;
-            }
+            frameTime = t;
             if (frame) {
                 CloseObject(frame);
                 frame->Release();
             }
             frame = next;
         }
-        if (!frame) return r;
-        if (dst != lastDst_) {
-            lastDst_ = dst;  // new destination (resized): it needs the current image again
-            copiedId_ = UINT64_MAX;
+        if (sampled && issuedSinceFlush_) {
+            gpu_->ctx->Flush();  // let the sample copies run now (results are picked up later)
+            issuedSinceFlush_ = false;
         }
-        if (!copy_ || !dst || contentId_ == copiedId_) {
-            // Skipped frame, or the same image we already have: release it.
+        if (!frame) return r;
+
+        bool want = copy_ && dst;
+        if (sampled) {
+            // One frame at a time waits for its verdict in dst; copy only when nothing is pending.
+            want = want && !waitDecision_ && frameSlot >= 0;
+        } else {
+            want = want && contentId_ != copiedId_;
+        }
+        if (!want) {
             CloseObject(frame);
             frame->Release();
             return r;
         }
 
-        WgcSizeInt32 content{};
-        frame->ContentSize(&content);
-        r.time = contentTime_ > 0 ? contentTime_ : NowSeconds();
-
-        IInspectable* surface = nullptr;
-        if (SUCCEEDED(frame->Surface((void**)&surface)) && surface) {
-            IDirect3DDxgiInterfaceAccess* access = nullptr;
-            if (SUCCEEDED(surface->QueryInterface(IID_IDirect3DDxgiInterfaceAccess, (void**)&access)) && access) {
-                ComPtr<ID3D11Texture2D> tex;
-                if (SUCCEEDED(access->GetInterface(__uuidof(ID3D11Texture2D), (void**)tex.GetAddressOf()))) {
-                    D3D11_TEXTURE2D_DESC td;
-                    tex->GetDesc(&td);
-                    // WGC frames cover the DWM extended frame bounds of the window.
-                    RECT frameBounds{};
-                    if (FAILED(DwmGetWindowAttribute(target_, DWMWA_EXTENDED_FRAME_BOUNDS, &frameBounds, sizeof(frameBounds))))
-                        GetWindowRect(target_, &frameBounds);
-                    LONG ox = client.left - frameBounds.left;
-                    LONG oy = client.top - frameBounds.top;
-                    LONG w = client.right - client.left;
-                    LONG h = client.bottom - client.top;
-                    LONG maxW = std::min<LONG>((LONG)td.Width, content.Width);
-                    LONG maxH = std::min<LONG>((LONG)td.Height, content.Height);
-                    D3D11_BOX box;
-                    box.left = (UINT)std::clamp<LONG>(ox, 0, maxW);
-                    box.top = (UINT)std::clamp<LONG>(oy, 0, maxH);
-                    box.right = (UINT)std::clamp<LONG>(ox + w, 0, maxW);
-                    box.bottom = (UINT)std::clamp<LONG>(oy + h, 0, maxH);
-                    box.front = 0;
-                    box.back = 1;
-                    if (box.right > box.left && box.bottom > box.top) {
-                        gpu_->ctx->CopySubresourceRegion(dst, 0, 0, 0, 0, tex.Get(), 0, &box);
-                        r.newFrame = true;
-                        copiedId_ = contentId_;
-                    }
-                }
-                access->Release();
+        bool copied = CopyFrame(frame, client, dst);
+        if (copied) {
+            if (sampled) {
+                waitDecision_ = true;
+                decisionSlot_ = frameSlot;
+                decisionSince_ = NowSeconds();
+                decisionTime_ = frameTime;
+            } else {
+                r.newFrame = true;
+                r.time = contentTime_ > 0 ? contentTime_ : NowSeconds();
+                copiedId_ = contentId_;
             }
-            surface->Release();
         }
         CloseObject(frame);
         frame->Release();
-
-        if (content.Width != size_.Width || content.Height != size_.Height) {
-            if (content.Width > 0 && content.Height > 0) {
-                size_ = content;
-                pool_->Recreate(winrtDevice_, kPixelFormatB8G8R8A8, 2, size_);
-            }
-        }
         return r;
     }
 
@@ -290,6 +277,160 @@ public:
     }
 
 private:
+    static ComPtr<ID3D11Texture2D> FrameTexture(IDirect3D11CaptureFrame* f) {
+        ComPtr<ID3D11Texture2D> tex;
+        IInspectable* surface = nullptr;
+        if (SUCCEEDED(f->Surface((void**)&surface)) && surface) {
+            IDirect3DDxgiInterfaceAccess* access = nullptr;
+            if (SUCCEEDED(surface->QueryInterface(IID_IDirect3DDxgiInterfaceAccess, (void**)&access)) && access) {
+                access->GetInterface(__uuidof(ID3D11Texture2D), (void**)tex.GetAddressOf());
+                access->Release();
+            }
+            surface->Release();
+        }
+        return tex;
+    }
+
+    // Copies the client area of the frame into dst; recreates the pool when the window resized.
+    bool CopyFrame(IDirect3D11CaptureFrame* frame, const RECT& client, ID3D11Texture2D* dst) {
+        WgcSizeInt32 content{};
+        frame->ContentSize(&content);
+        bool ok = false;
+        ComPtr<ID3D11Texture2D> tex = FrameTexture(frame);
+        if (tex) {
+            D3D11_TEXTURE2D_DESC td;
+            tex->GetDesc(&td);
+            // WGC frames cover the DWM extended frame bounds of the window.
+            RECT frameBounds{};
+            if (FAILED(DwmGetWindowAttribute(target_, DWMWA_EXTENDED_FRAME_BOUNDS, &frameBounds, sizeof(frameBounds))))
+                GetWindowRect(target_, &frameBounds);
+            LONG ox = client.left - frameBounds.left, oy = client.top - frameBounds.top;
+            LONG w = client.right - client.left, h = client.bottom - client.top;
+            LONG maxW = std::min<LONG>((LONG)td.Width, content.Width);
+            LONG maxH = std::min<LONG>((LONG)td.Height, content.Height);
+            D3D11_BOX box;
+            box.left = (UINT)std::clamp<LONG>(ox, 0, maxW);
+            box.top = (UINT)std::clamp<LONG>(oy, 0, maxH);
+            box.right = (UINT)std::clamp<LONG>(ox + w, 0, maxW);
+            box.bottom = (UINT)std::clamp<LONG>(oy + h, 0, maxH);
+            box.front = 0;
+            box.back = 1;
+            if (box.right > box.left && box.bottom > box.top) {
+                gpu_->ctx->CopySubresourceRegion(dst, 0, 0, 0, 0, tex.Get(), 0, &box);
+                ok = true;
+            }
+        }
+        if ((content.Width != size_.Width || content.Height != size_.Height) && content.Width > 0 && content.Height > 0) {
+            size_ = content;
+            pool_->Recreate(winrtDevice_, kPixelFormatB8G8R8A8, 2, size_);
+        }
+        return ok;
+    }
+
+    // ---- duplicate detection by sampling (systems without dirty regions, e.g. Windows 10) ----
+    // A sparse sample of every frame (8x6 blocks of 16x16 pixels) is copied into a staging ring and
+    // compared with the previous frame's sample once the GPU has done the copy. Nothing waits for the
+    // GPU: results are picked up on later polls (usually 1-3 ms later).
+    static constexpr UINT kCols = 8, kRows = 6, kB = 16;
+    static constexpr int kRing = 32;
+    struct SampleSlot {
+        ComPtr<ID3D11Texture2D> tex;
+        double time = 0;
+    };
+
+    int IssueSample(IDirect3D11CaptureFrame* f, double t) {
+        if (pending_ >= kRing) return -1;  // too many in flight: this one stays unknown
+        ComPtr<ID3D11Texture2D> tex = FrameTexture(f);
+        if (!tex) return -1;
+        D3D11_TEXTURE2D_DESC td;
+        tex->GetDesc(&td);
+        WgcSizeInt32 cs{};
+        f->ContentSize(&cs);
+        UINT w = std::min<UINT>(td.Width, (UINT)std::max(cs.Width, 1)), h = std::min<UINT>(td.Height, (UINT)std::max(cs.Height, 1));
+        if (w < kB * 2 || h < kB * 2) return -1;
+        SampleSlot& sl = ring_[head_];
+        if (!sl.tex || sampleFormat_ != td.Format) {
+            if (sampleFormat_ != td.Format)
+                for (auto& x : ring_) x.tex.Reset();
+            D3D11_TEXTURE2D_DESC sd{};
+            sd.Width = kCols * kB;
+            sd.Height = kRows * kB;
+            sd.MipLevels = 1;
+            sd.ArraySize = 1;
+            sd.Format = td.Format;
+            sd.SampleDesc.Count = 1;
+            sd.Usage = D3D11_USAGE_STAGING;
+            sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (FAILED(gpu_->device->CreateTexture2D(&sd, nullptr, &sl.tex))) return -1;
+            sampleFormat_ = td.Format;
+        }
+        auto* ctx = gpu_->ctx.Get();
+        for (UINT j = 0; j < kRows; j++)
+            for (UINT i = 0; i < kCols; i++) {
+                UINT x = std::min((UINT)((i + 0.5) * w / kCols) - kB / 2, w - kB);
+                UINT y = std::min((UINT)((j + 0.5) * h / kRows) - kB / 2, h - kB);
+                D3D11_BOX b{x, y, 0, x + kB, y + kB, 1};
+                ctx->CopySubresourceRegion(sl.tex.Get(), 0, i * kB, j * kB, 0, tex.Get(), 0, &b);
+            }
+        sl.time = t;
+        int idx = head_;
+        head_ = (head_ + 1) % kRing;
+        pending_++;
+        issuedSinceFlush_ = true;
+        return idx;
+    }
+
+    void ResolveSamples(CaptureResult& r) {
+        auto* ctx = gpu_->ctx.Get();
+        const size_t row = (size_t)kCols * kB * 4;
+        while (pending_ > 0) {
+            SampleSlot& sl = ring_[tail_];
+            D3D11_MAPPED_SUBRESOURCE m{};
+            HRESULT hr = ctx->Map(sl.tex.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) break;
+            bool changed = true;
+            if (SUCCEEDED(hr)) {
+                cur_.resize(row * kRows * kB);
+                for (UINT y = 0; y < kRows * kB; y++) memcpy(cur_.data() + y * row, (const uint8_t*)m.pData + (size_t)y * m.RowPitch, row);
+                ctx->Unmap(sl.tex.Get(), 0);
+                changed = prev_.size() != cur_.size() || memcmp(prev_.data(), cur_.data(), cur_.size()) != 0;
+                prev_.swap(cur_);
+            }
+            int idx = tail_;
+            tail_ = (tail_ + 1) % kRing;
+            pending_--;
+            if (changed) {
+                r.frames++;
+                contentTime_ = sl.time;
+            }
+            if (waitDecision_ && idx == decisionSlot_) {
+                waitDecision_ = false;
+                if (changed || uncopiedUnique_) {
+                    r.newFrame = true;  // dst already holds this frame
+                    r.time = sl.time;
+                    uncopiedUnique_ = false;
+                }
+            } else if (changed) {
+                uncopiedUnique_ = true;  // new content we have not copied (yet)
+            }
+        }
+        // Never keep a frame waiting forever (stalled GPU): take it.
+        if (waitDecision_ && NowSeconds() - decisionSince_ > 0.1) {
+            waitDecision_ = false;
+            r.newFrame = true;
+            r.time = decisionTime_;
+            uncopiedUnique_ = false;
+        }
+    }
+
+    SampleSlot ring_[kRing];
+    int head_ = 0, tail_ = 0, pending_ = 0;
+    DXGI_FORMAT sampleFormat_ = DXGI_FORMAT_UNKNOWN;
+    std::vector<uint8_t> prev_, cur_;
+    bool issuedSinceFlush_ = false, waitDecision_ = false, uncopiedUnique_ = true;
+    int decisionSlot_ = -1;
+    double decisionSince_ = 0, decisionTime_ = 0;
+
     // Did this frame change anything? Windows 11 24H2+ reports the changed areas of every frame
     // (dirty regions): a frame without any is the same image delivered again (seen at 500 frames
     // per second for a game rendering 47). Free, no GPU work. Older systems: every frame counts.

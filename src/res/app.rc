@@ -6,8 +6,8 @@ IDR_SPLASH_PNG RCDATA "splash_logo.png"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 1,0,1,0
+PRODUCTVERSION 1,0,1,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS VOS_NT_WINDOWS32
@@ -20,12 +20,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "MoonUp"
       VALUE "FileDescription", "MoonUp - real-time upscaling and frame generation"
-      VALUE "FileVersion", "1.0.0.0"
+      VALUE "FileVersion", "1.0.1.0"
       VALUE "InternalName", "MoonUp"
       VALUE "LegalCopyright", "Copyright (C) 2026 MoonUp"
       VALUE "OriginalFilename", "MoonUp.exe"
       VALUE "ProductName", "MoonUp"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "ProductVersion", "1.0.1"
     END
   END
   BLOCK "VarFileInfo"
