@@ -97,8 +97,16 @@ Training scripts for the networks live in `tools/` (`train_neural_ft.py`, `train
 MoonUp is **source-available** under the [PolyForm Noncommercial License 1.0.0](LICENSE).
 
 - ✅ Free to download, use on your own computer, study and modify for **personal, non-commercial** purposes.
-- ❌ **No commercial use** — you may not sell it, bundle it into paid products or use it to make money.
+- ❌ **No commercial use without a license** — selling it, bundling it, using it in a business or venue requires a [commercial license](COMMERCIAL.md).
 
 Third-party components keep their own licenses — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### 💼 Commercial use
+
+Internet cafés, gaming centers, companies, PC builders and anyone who makes money with MoonUp need a
+**commercial license**. Plans start at **$149 / year**; venue, business, OEM and source licenses are listed in
+**[COMMERCIAL.md](COMMERCIAL.md)**.
+
+Contact: **statways1707@gmail.com**
 
 <p align="center"><sub>Made by <a href="https://github.com/twayst0">twayst0</a> · 🌕</sub></p>
